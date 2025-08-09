@@ -1,0 +1,296 @@
+<!doctype html>
+
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Cross Chase — Web Game</title>
+  <style>
+    :root{--size:60px;--gap:6px}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;margin:16px;background:#f4f7fb;color:#0b202a}
+    h1{margin:0 0 8px}
+    .game{display:flex;gap:16px}
+    .board{width:calc(var(--size)*7 + var(--gap)*6);height:calc(var(--size)*7 + var(--gap)*6);background:#2b3d3f;padding:10px;border-radius:10px;box-shadow:0 4px 14px rgba(10,10,10,0.15);}
+    .grid{display:grid;grid-template-columns:repeat(7,var(--size));grid-template-rows:repeat(7,var(--size));gap:var(--gap);width:100%;height:100%;}
+    .cell{background:#14302f;border-radius:6px;position:relative;display:flex;align-items:center;justify-content:center;font-size:12px;color:#cfe7e3}
+    .cross{background:linear-gradient(135deg,#1a3b3a,#14302f)}
+    .arrow{font-size:18px;opacity:0.45}
+    .controls{width:320px}
+    .pieces{display:flex;flex-wrap:wrap;gap:8px}
+    .player{border-radius:8px;padding:8px;background:#fff;box-shadow:0 2px 6px rgba(0,0,0,0.08);width:100%}
+    .player h3{margin:0 0 6px;font-size:14px}
+    .tokens{display:flex;gap:6px}
+    .token{width:22px;height:22px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;color:#fff;font-size:11px}
+    button{padding:8px 12px;border-radius:6px;border:0;background:#0b7285;color:white;cursor:pointer}
+    .log{height:220px;overflow:auto;border-radius:6px;padding:8px;background:#fff;margin-top:8px}
+    .center{background:linear-gradient(135deg,#ffefc7,#ffd89b);}
+    .start-slot{background:#0b7285;color:#fff;padding:4px 6px;border-radius:6px;font-size:12px}
+    .piece-on{position:absolute;transform:translate(-12px,-12px)}
+  </style>
+</head>
+<body>
+  <h1>Cross Chase — Web Game</h1>
+  <div style="display:flex;gap:12px;align-items:flex-start">
+    <div class="board">
+      <div class="grid" id="grid"></div>
+    </div>
+    <div class="controls">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+        <button id="roll">Roll (1,2,3,4,8)</button>
+        <div id="rolled">Rolled: -</div>
+      </div>
+      <div class="player" id="playerInfo"></div>
+      <div class="log" id="log"></div>
+    </div>
+  </div><script>
+// Cross Chase — simplified web implementation
+// Board layout: 7x7 grid. Outer ring positions (index array) go anti-clockwise starting top-left corner across top row etc.
+// Inner 'cross' positions (safe squares) are at the middle of each side (positions we protect from capture)
+
+const ROWS = 7;
+const COLS = 7;
+const gridEl = document.getElementById('grid');
+const logEl = document.getElementById('log');
+const rollBtn = document.getElementById('roll');
+const rolledEl = document.getElementById('rolled');
+const playerInfoEl = document.getElementById('playerInfo');
+
+// Create 7x7 cells
+let cells = [];
+for(let r=0;r<ROWS;r++){
+  for(let c=0;c<COLS;c++){
+    const el = document.createElement('div'); el.className='cell';
+    el.dataset.r=r; el.dataset.c=c; gridEl.appendChild(el); cells.push(el);
+  }
+}
+
+// Define outer ring positions in anti-clockwise order starting at top-left (0,0)
+function idx(r,c){return r*COLS + c}
+const outer = [];
+// top row left->right
+for(let c=0;c<7;c++) outer.push(idx(0,c));
+// right col top->bottom excluding top
+for(let r=1;r<7;r++) outer.push(idx(r,6));
+// bottom row right->left excluding corner
+for(let c=5;c>=0;c--) outer.push(idx(6,c));
+// left col bottom->top excluding both corners
+for(let r=5;r>0;r--) outer.push(idx(r,0));
+// outer.length should be 24
+
+// cross-mark positions (safe from capture)
+const crossPositions = [ idx(2,2), idx(2,4), idx(4,2), idx(4,4) ];
+// entry positions into inner for each player (where players turn inward). We'll place 4 entry spots at mid of each quadrant of outer
+const entryIndices = [ outer[3], outer[9], outer[15], outer[21] ];
+// inner path for each player: 3 steps then center (center idx = 3,3)
+const center = idx(3,3);
+const innerPaths = {
+  0: [ idx(1,3), idx(2,3), idx(3,3) ], // top entry
+  1: [ idx(3,5), idx(3,4), idx(3,3) ], // right entry
+  2: [ idx(5,3), idx(4,3), idx(3,3) ], // bottom
+  3: [ idx(3,1), idx(3,2), idx(3,3) ]  // left
+};
+
+// decorate board: arrows and crosses
+cells.forEach((el,i)=>{
+  if(crossPositions.includes(i)) el.classList.add('cross');
+  if(i===center) el.classList.add('center');
+});
+
+// Draw arrows along outer showing anti-clockwise path
+outer.forEach((pos,pi)=>{
+  const el=cells[pos];
+  el.innerHTML = '<div class="arrow">⟲</div>';
+});
+
+// Game state
+const players = [ {id:0,color:'#e74c3c',name:'Red'}, {id:1,color:'#2ecc71',name:'Green'}, {id:2,color:'#3498db',name:'Blue'}, {id:3,color:'#f1c40f',name:'Yellow'} ];
+let turn = 0; // player index
+let rolled = null;
+let canSplit = false; // when rolled 8
+
+// pieces: each piece has {player,pos,atHome,hasCaptured}
+let pieces = [];
+players.forEach(p=>{
+  for(let i=0;i<4;i++) pieces.push({player:p.id,id:i,atHome:true,pos:null,hasCaptured:false,finished:false});
+});
+
+function writeLog(s){ const d=document.createElement('div'); d.textContent=s; logEl.prepend(d); }
+
+function render(){
+  // clear piece markers
+  document.querySelectorAll('.piece-on').forEach(n=>n.remove());
+  // show start slots
+  playerInfoEl.innerHTML = '';
+  players.forEach(p=>{
+    const wrapper = document.createElement('div'); wrapper.className='player';
+    wrapper.innerHTML = `<h3 style="color:${p.color}">${p.name} (Player ${p.id+1}) ${turn===p.id?'<strong> — Your turn</strong>':''}</h3>`;
+    const tok = document.createElement('div'); tok.className='tokens';
+    pieces.filter(x=>x.player===p.id).forEach(pc=>{
+      const t = document.createElement('div'); t.className='token'; t.style.background=p.color; t.textContent=pc.finished? '✔': (pc.atHome?'H':pc.id+1);
+      t.title = `piece ${pc.id}`;
+      tok.appendChild(t);
+    });
+    wrapper.appendChild(tok); playerInfoEl.appendChild(wrapper);
+  });
+
+  // draw pieces on board
+  pieces.forEach(pc=>{
+    if(pc.atHome){
+      // draw small marker near board edge: create element in control column
+      // skip explicit start placements for simplicity
+    } else if(pc.pos!=null){
+      const el = cells[pc.pos];
+      const marker = document.createElement('div'); marker.className='piece-on';
+      marker.style.left = (Math.random()*30+30) + '%'; marker.style.top = (Math.random()*30+30) + '%';
+      marker.style.background = players[pc.player].color; marker.style.borderRadius='50%'; marker.style.width='18px'; marker.style.height='18px'; marker.style.position='absolute'; marker.style.zIndex=20; marker.title=`P${pc.player+1}-${pc.id}`;
+      el.appendChild(marker);
+    }
+  });
+}
+
+// helper: find piece at pos
+function piecesAt(pos){ return pieces.filter(p=>!p.atHome && p.pos===pos && !p.finished); }
+
+// move logic: move a piece from its current pos forward n spaces on outer unless entering inner
+function advancePiece(pc,n){
+  // if at home, place at player's entry outer start (we'll choose an outer start per player)
+  const playerStartOuterIndex = [0,6,12,18]; // starting corners for each player
+  if(pc.atHome){
+    const startPos = outer[playerStartOuterIndex[pc.player]];
+    if(isOccupiedByOwn(startPos,pc.player)) { writeLog(`Cannot bring piece ${pc.id} out: own piece blocking start.`); return false; }
+    pc.atHome=false; pc.pos = startPos; writeLog(`${players[pc.player].name} brings piece ${pc.id} onto board at start.`); return true;
+  }
+  // If piece is in inner path already
+  const path = getInnerPathForPlayer(pc.player);
+  if(path.includes(pc.pos)){
+    const idxIn = path.indexOf(pc.pos);
+    const targetIdx = idxIn + n;
+    if(targetIdx >= path.length){
+      // overshoot: cannot move
+      writeLog(`Move overshoots for piece ${pc.id}`); return false;
+    }
+    const targetPos = path[targetIdx];
+    if(isOccupiedByOwn(targetPos,pc.player)) { writeLog(`Move blocked by own piece in inner path.`); return false; }
+    // move
+    pc.pos = targetPos; if(targetPos===center){ pc.finished=true; writeLog(`${players[pc.player].name} piece ${pc.id} reached center!`); }
+    return true;
+  }
+  // piece on outer ring
+  const currIndex = outer.indexOf(pc.pos);
+  if(currIndex===-1){ writeLog('Invalid position for outer move'); return false; }
+  let newIndex = (currIndex + n) % outer.length;
+  let newPos = outer[newIndex];
+  // Check if newPos is an entry for this player and player has captured at least one piece => can go inner
+  if(entryIndices.includes(newPos) && pc.hasCaptured){
+    // determine which player's entry this is. map entry index to player id order 0..3
+    const entryPlayer = entryIndices.indexOf(newPos);
+    if(entryPlayer===pc.player){
+      // enter inner: move into first inner path position
+      const inner = getInnerPathForPlayer(pc.player);
+      if(isOccupiedByOwn(inner[0],pc.player)){ writeLog('Inner entry blocked by own piece'); return false; }
+      pc.pos = inner[0]; writeLog(`${players[pc.player].name} piece ${pc.id} enters inner path.`); return true;
+    }
+  }
+  // normal outer move — cannot land on own piece
+  if(isOccupiedByOwn(newPos,pc.player)) { writeLog('Move blocked by your own piece on target square.'); return false; }
+  // capture rules: if landing on opponent piece and their pos is not cross-mark and you don't have two pieces in same
+  const others = piecesAt(newPos);
+  if(others.length>0){
+    // cannot capture if newPos is cross
+    if(crossPositions.includes(newPos)){
+      writeLog('Cannot capture on cross-marked square.');
+      return false;
+    }
+    // cannot capture if after capture you'd have two of your pieces in that square
+    const ownAfter = pieces.filter(p=>p.player===pc.player && p.pos===newPos).length;
+    if(ownAfter>=1){ writeLog('Cannot capture because you would have two pieces in same box.'); return false; }
+    // capture allowed: send all opponent pieces there home
+    others.forEach(op=>{ op.atHome=true; op.pos=null; op.hasCaptured=false; writeLog(`${players[op.player].name} piece ${op.id} was captured! Returned home.`); });
+    pc.hasCaptured = true;
+  }
+  pc.pos = newPos; return true;
+}
+
+function isOccupiedByOwn(pos,playerId){ return pieces.some(p=>!p.atHome && p.pos===pos && p.player===playerId && !p.finished); }
+
+function getInnerPathForPlayer(playerId){ return innerPaths[playerId]; }
+
+// choose piece to move: naive UI: prompt to select from list of movable pieces
+function onRoll(){
+  const options = [1,2,3,4,8];
+  rolled = options[Math.floor(Math.random()*options.length)];
+  rolledEl.textContent = 'Rolled: '+rolled; writeLog(`${players[turn].name} rolled ${rolled}`);
+  // gather movable pieces
+  const myPieces = pieces.filter(p=>p.player===turn && !p.finished);
+  const movable = myPieces.filter(p=>{
+    if(p.atHome) return true; // can bring in
+    // check outer/inner movement validity quickly by attempting a dry-run
+    // We'll assume test by cloning piece
+    const clone = {...p};
+    return canMoveSim(clone,rolled);
+  });
+  if(movable.length===0){ writeLog('No valid moves, turn skipped.'); nextTurn(); return; }
+  // if rolled 8, ask if split desired and multiple pieces available
+  if(rolled===8 && movable.length>=2){
+    // let user choose split: for simplicity provide prompt to split into two ints that sum to 8
+    let choice = prompt('You rolled 8. To split between two pieces enter like "5,3" or cancel to use full 8 on one piece.');
+    if(choice){
+      const parts = choice.split(',').map(x=>parseInt(x.trim())).filter(Boolean);
+      if(parts.length===2 && parts[0]+parts[1]===8){
+        // pick two pieces
+        const id1 = prompt('Select first piece id to move (0-3) from your pieces:');
+        const id2 = prompt('Select second piece id to move (0-3):');
+        const p1 = pieces.find(x=>x.player===turn && x.id==id1);
+        const p2 = pieces.find(x=>x.player===turn && x.id==id2);
+        if(p1 && p2 && p1!==p2){
+          const ok1 = advancePiece(p1,parts[0]);
+          const ok2 = advancePiece(p2,parts[1]);
+          if(ok1||ok2) { render(); checkWinner(); nextTurn(); }
+          return;
+        }
+      }
+    }
+  }
+  // otherwise pick one piece to move — ask via prompt (id)
+  const ids = movable.map(m=>m.id).join(',');
+  const pick = prompt(`Select piece id to move from: ${ids}`);
+  const chosen = pieces.find(p=>p.player===turn && p.id==pick);
+  if(!chosen){ writeLog('Invalid selection, turn skipped.'); nextTurn(); return; }
+  const ok = advancePiece(chosen,rolled);
+  render(); checkWinner(); if(ok) nextTurn(); else nextTurn();
+}
+
+function canMoveSim(pc,n){
+  // simplified validity test using temp clone
+  if(pc.atHome) return true;
+  const path = getInnerPathForPlayer(pc.player);
+  if(path.includes(pc.pos)){
+    const idxIn = path.indexOf(pc.pos);
+    const targetIdx = idxIn + n; if(targetIdx>=path.length) return false;
+    const targetPos = path[targetIdx]; if(isOccupiedByOwn(targetPos,pc.player)) return false; return true;
+  }
+  const currIndex = outer.indexOf(pc.pos);
+  if(currIndex===-1) return false;
+  let newIndex = (currIndex + n) % outer.length; let newPos = outer[newIndex];
+  if(isOccupiedByOwn(newPos,pc.player)) return false;
+  if(piecesAt(newPos).length>0 && crossPositions.includes(newPos)) return false;
+  if(piecesAt(newPos).length>0 && pieces.filter(p=>p.player===pc.player && p.pos===newPos).length>=1) return false;
+  // entry logic
+  if(entryIndices.includes(newPos) && !pc.hasCaptured) return false;
+  return true;
+}
+
+function nextTurn(){
+  turn = (turn+1)%players.length; render();
+}
+
+function checkWinner(){
+  const winners = players.filter(p=> pieces.filter(pc=>pc.player===p.id && pc.finished).length===4 );
+  if(winners.length>0){ writeLog(`${winners[0].name} won the game!`); alert(winners[0].name + ' wins!'); }
+}
+
+rollBtn.addEventListener('click', onRoll);
+
+render(); writeLog('Game ready. Click Roll to begin. Rules: roll gives 1,2,3,4,8. You must capture at least one piece to enter inner. Cross-mark squares protect from capture. Two of your pieces cannot share a square.');
+</script></body>
+</html>
